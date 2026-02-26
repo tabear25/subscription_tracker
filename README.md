@@ -11,12 +11,12 @@ Notionで管理しているサブスクリプションの支払い情報を取�
 
 # 前提条件（Prerequisites）
 
-* Googleアカウント（Google Apps ScriptとGoogleカレンダーを使用します）
+* Googleアカウント
 * Notionアカウント
 
 ## 必要な環境（Required Environment）
 
-* Google Apps Script (ブラウザ上で動作するため、ローカルへの環境構築は不要です)
+* Google Apps Script
 
 # 使い方（How to Use）
 
