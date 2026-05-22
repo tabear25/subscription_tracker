@@ -87,6 +87,8 @@ GASの「スクリプトプロパティ」機能を使用します。
 
 > **重要**: かつて定番だった **LINE Notify は 2025年3月31日にサービス終了**しました。本ツールでは現行の **LINE Messaging API（LINE公式アカウント経由のプッシュ配信）** を使用します。
 
+> 📘 **初めての方へ**: 画面付きの詳しい作業手順は [docs/LINE_SETUP.md](docs/LINE_SETUP.md) にまとめています。
+
 ### 仕組み
 
 GASから [Messaging API の broadcast エンドポイント](https://api.line.me/v2/bot/message/broadcast) を呼び出し、**公式アカウントを友だち追加しているユーザー全員**にメッセージを配信します。個人利用（自分1人だけが友だち）であれば、宛先のユーザーIDを調べる必要がなく最も簡単です。
