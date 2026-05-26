@@ -39,11 +39,19 @@ function main() {
     paymentDate.setHours(0, 0, 0, 0);
 
     if (paymentDate < today) {
-      const newDate = calculateNextPaymentDate(paymentDate, task.billing);
-      if (newDate) {
+      // 過去日が複数サイクル分たまっていても、今日以降になるまで繰り上げ続ける。
+      // 1回だけの繰り上げだと過去日のまま残り、「7日前ちょうど」の通知条件を
+      // 飛び越えて支払予告が送られないことがあるため。
+      let newDate = paymentDate;
+      while (newDate < today) {
+        const advanced = calculateNextPaymentDate(newDate, task.billing);
+        if (!advanced) break; // billing 不明などで進められない場合は中断（無限ループ防止）
+        newDate = advanced;
+      }
+      if (newDate.getTime() !== paymentDate.getTime()) {
         updateNotionDate(task.pageId, newDate);
         console.log(`🔄 自動更新: ${task.name} を ${formatDate(paymentDate)} から ${formatDate(newDate)} に変更`);
-        paymentDate = newDate; 
+        paymentDate = newDate;
       }
     }
 
