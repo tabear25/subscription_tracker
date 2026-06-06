@@ -101,10 +101,24 @@ function testUnusedDetection() {
   _assert(unused.length === 1 && unused[0].task.name === '古いサブスク', '抽出されたのは古いサブスク');
 }
 
+// 再契約候補（Canceledかつ再契約URLあり）の抽出を検証する。
+function testResubscribeCandidates() {
+  console.log("🚀 再契約候補抽出テスト開始...");
+  const canceled = [
+    { name: 'URLあり', price: '¥500', resubscribeUrl: 'https://example.com/join' },
+    { name: 'URLなし', price: '¥500', resubscribeUrl: null }
+  ];
+
+  const candidates = findResubscribeCandidates(canceled);
+  _assert(candidates.length === 1, '再契約候補は1件のみ');
+  _assert(candidates.length === 1 && candidates[0].name === 'URLあり', '再契約URLがあるものだけ抽出');
+}
+
 // 上記ロジックテストをまとめて実行する。
 function testAllLogic() {
   testBillingCycles();
   testPriceHeuristic();
   testUnusedDetection();
+  testResubscribeCandidates();
   console.log("🏁 ロジックテスト完了");
 }

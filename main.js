@@ -23,9 +23,10 @@ const PROP_PRICE = '料金';
 const PROP_BILLING = 'Billing';
 
 // 追加プロパティ
-const PROP_URL = 'URL';            // サービス/料金ページ（値上げ検知・継続/再契約への導線）
-const PROP_CANCEL_URL = '解約URL';  // 解約ページ（任意。未設定なら URL にフォールバック）
-const PROP_LAST_USED = '最終利用日'; // 最終利用日（未使用検知のシグナル。手動で更新する）
+const PROP_URL = 'URL';                  // サービス/料金ページ（値上げ検知・内容確認の導線）
+const PROP_CANCEL_URL = '解約URL';        // 解約ページ（任意。未設定なら URL にフォールバック）
+const PROP_RESUBSCRIBE_URL = '再契約URL'; // 会員登録ページ（解約済みサブの再契約導線）
+const PROP_LAST_USED = '最終利用日';       // 最終利用日（未使用検知のシグナル。手動で更新する）
 
 // 最終利用日からこの日数を超えて記録が更新されていなければ「未使用候補」とみなす
 const UNUSED_THRESHOLD_DAYS = 60;
@@ -33,6 +34,7 @@ const UNUSED_THRESHOLD_DAYS = 60;
 // ステータス管理
 const PROP_STATUS = 'Status';
 const ACTIVE_VALUE = 'Active';
+const CANCELED_VALUE = 'Canceled'; // 解約済み。再契約リマインドの対象に使う
 
 function main() {
   const tasks = fetchNotionData() || [];
@@ -93,16 +95,26 @@ function main() {
       console.log(`🔔 値上げ（料金変更）の可能性: ${priceCandidates.length}件`);
     }
 
-    // 使っていないサブスク検知 → 解約/再契約の見直しをLINEで促す
+    // 使っていないサブスク検知 → 解約の見直しをLINEで促す
     const unused = findUnusedSubscriptions(tasks, today);
     if (unused.length > 0) {
       sendLineMessage(buildUnusedAlertMessage(unused));
       console.log(`🔔 未使用サブスク検知: ${unused.length}件`);
     }
+
+    // 解約済みサブスクの再契約への誘導。
+    // 「再契約URL」が登録されているCanceledのものだけを対象にし、不要な通知を避ける。
+    const canceled = fetchNotionData(CANCELED_VALUE) || [];
+    const resubscribe = findResubscribeCandidates(canceled);
+    if (resubscribe.length > 0) {
+      sendLineMessage(buildResubscribeMessage(resubscribe));
+      console.log(`🔔 再契約の誘導: ${resubscribe.length}件`);
+    }
   }
 }
 
-function fetchNotionData() {
+function fetchNotionData(statusValue) {
+  const targetStatus = statusValue || ACTIVE_VALUE; // 既定はActive（呼び出し側互換のため）
   const url = `https://api.notion.com/v1/databases/${DATABASE_ID}/query`;
   const options = {
     method: 'post',
@@ -111,12 +123,12 @@ function fetchNotionData() {
       'Notion-Version': '2022-06-28',
       'Content-Type': 'application/json'
     },
-    // StatusがActiveのものだけ取得する
+    // 指定したStatus（既定はActive）のものだけ取得する
     payload: JSON.stringify({
       filter: {
         property: PROP_STATUS,
         select: {
-          equals: ACTIVE_VALUE
+          equals: targetStatus
         }
       }
     })
@@ -167,6 +179,12 @@ function fetchNotionData() {
         cancelUrl = props[PROP_CANCEL_URL].url;
       }
 
+      // 再契約URL（会員登録ページ。解約済みサブの再契約導線に使用）
+      let resubscribeUrl = null;
+      if (props[PROP_RESUBSCRIBE_URL] && props[PROP_RESUBSCRIBE_URL].url) {
+        resubscribeUrl = props[PROP_RESUBSCRIBE_URL].url;
+      }
+
       // 最終利用日（未使用検知のシグナル）
       let lastUsed = null;
       if (props[PROP_LAST_USED] && props[PROP_LAST_USED].date) {
@@ -181,7 +199,7 @@ function fetchNotionData() {
         status = props[PROP_STATUS].status.name;
       }
 
-      return { pageId: page.id, name, date: dateStr, price, priceNumber, billing, status, url, cancelUrl, lastUsed };
+      return { pageId: page.id, name, date: dateStr, price, priceNumber, billing, status, url, cancelUrl, resubscribeUrl, lastUsed };
     });
   } catch (e) {
     console.log("データ取得エラー: " + e);
@@ -410,7 +428,7 @@ function findUnusedSubscriptions(tasks, today) {
   return result;
 }
 
-// 未使用サブスクの見直し（解約 / 継続・再契約）を促すメッセージを組み立てる。
+// 未使用サブスクの見直し（解約 / 継続）を促すメッセージを組み立てる。
 // LINEは送信専用のため、URI（リンク）で解約・継続の導線を提示する。
 function buildUnusedAlertMessage(unusedList) {
   const lines = [
@@ -426,11 +444,36 @@ function buildUnusedAlertMessage(unusedList) {
     const cancel = task.cancelUrl || task.url;
     const service = task.url;
     if (cancel) lines.push(`　解約はこちら: ${cancel}`);
-    if (service) lines.push(`　継続・再契約はこちら: ${service}`);
+    if (service) lines.push(`　継続して使う（内容確認）: ${service}`);
     if (!cancel && !service) lines.push('　（Notionに「解約URL」「URL」を登録すると導線を表示できます）');
     lines.push('');
   });
 
   lines.push('継続する場合は、Notionの「最終利用日」を今日に更新すると次回から通知されません。');
+  return lines.join('\n');
+}
+
+// 解約済み（Canceled）のうち、再契約URLが登録されているものを返す。
+// URLを登録したサブだけが対象になるため、再契約を検討したいものだけを通知できる。
+function findResubscribeCandidates(canceledTasks) {
+  return (canceledTasks || []).filter(task => !!task.resubscribeUrl);
+}
+
+// 解約済みサブスクの再契約への誘導メッセージを組み立てる。
+function buildResubscribeMessage(candidates) {
+  const lines = [
+    '↩️ 再契約できるサブスクがあります',
+    '',
+    '以前に解約したサービスです。また使いたいものがあれば、以下から再契約できます。',
+    ''
+  ];
+
+  candidates.forEach(task => {
+    lines.push(`■ ${task.name}（${task.price}）`);
+    lines.push(`　再契約はこちら: ${task.resubscribeUrl}`);
+    lines.push('');
+  });
+
+  lines.push('※ 再契約したら、Notionの「Status」を Active に戻してください。');
   return lines.join('\n');
 }
