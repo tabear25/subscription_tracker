@@ -9,7 +9,7 @@ Notionで管理しているサブスクリプションの支払い情報を取�
   * **支払予告**: 上記の「支払日7日前」通知をLINEにも配信します。
   * **月末の見直しリマインド**: 毎月末日に「先月、新規でサブスクを登録したり料金プランを変更したりしていませんか？」という確認メッセージを、現在の契約状況サマリー（契約中の件数・月額/年額換算合計・未使用候補）付きで送ります。
 * **日付の自動更新**: 支払日が過ぎると、支払サイクルに合わせてNotion上の「次回支払日」を自動で書き換えます。
-  * 現在、**毎月（Monthly）/ 四半期（Quarterly）/ 年（Yearly）/ 2年（2 years）** の4パターンに対応しています。
+  * 現在、**毎月（Monthly）/ 3ヶ月ごと（Quarterly・Every 3 months・3 months）/ 年（Yearly）/ 2年（2 years）** に対応しています。
   * 月末払い（29〜31日）は、その日が無い月は月末日にそろえます（例: 1/31 → 2/28）。
 * **値上げ検知**（任意）: 「価格監視」をONにしたサービスについて、登録した `URL` のページを**月1回**自動取得し、登録料金と一致する金額が見つからない場合に「値上げ・プラン変更の可能性」をLINEで通知します。※JavaScriptで描画されるページは金額を取得できないことがあり、その場合は手動確認を促すメッセージを送ります（ベストエフォート）。
 * **未使用サブスク検知**: 「最終利用日」が一定日数（デフォルト60日）以上前の契約を、月末リマインドで「解約候補」として一覧表示します。利用日はLINEで「サービス名 使った」と送ると記録できます。
@@ -48,25 +48,26 @@ Notionで管理しているサブスクリプションの支払い情報を取�
 | Name | Title | サービス名 |
 | 更新日 | Date | 次回の支払日 |
 | 料金 | Number | 金額 |
-| Billing | Select | `Monthly`, `Quarterly`, `Yearly`, `2 years` のいずれかを選択 |
+| Billing | Select | `Monthly`, `Quarterly`（`Every 3 months` / `3 months` でも可）, `Yearly`, `2 years` のいずれかを選択 |
 | Status | Select | `Active` (契約中) を選択。LINEからの解約で `Canceled` が入ります |
 
 **追加機能を使う場合のプロパティ（任意・無くても基本機能は動作します）**
 
 | プロパティ名 | 種類 (Type) | 用途 |
 | --- | --- | --- |
-| URL | URL | 値上げ検知でチェックするページ／再契約への誘導先 |
+| URL | URL | サービスのアカウント（契約管理）ページ。値上げ検知のチェック先、解約・再契約リンクの予備としても使います |
 | 価格監視 | Checkbox | ONにしたサービスだけ値上げ検知（月1チェック）の対象になります |
 | 料金確認日 | Date | 値上げ検知が最後にチェックした日（ツールが自動更新。手動入力不要） |
 | 最終利用日 | Date | 最後に使った日。未使用検知に使用。LINEの「使った」で自動更新されます |
-| 解約URL | URL | LINEで「解約したい」と送ったときに案内する解約ページ（最優先で表示） |
+| 解約用URL | URL | LINEで「解約したい」と送ったときに案内する解約ページ（最優先で表示） |
+| 再契約URL | URL | LINEで「再契約したい」と送ったときに案内する申し込みページ（最優先で表示） |
 | 解約方法 | Text | 解約の手順メモ（例:「受付で退会届。前月10日まで」）。LINEの解約案内に表示 |
 | 支払方法 | Select（またはText） | `App Store` / `Google Play` / `docomo` など。App Store・Google Play・キャリア経由の課金は**サービスのサイトでは解約できない**ため、案内をそちらの手順に切り替えます |
 | 別名 | Text | LINEで呼ぶときの名前（カンマ区切り。例: `ネトフリ, ネットフリックス`） |
 
-> 列名はコード冒頭の定数（`PROP_URL` など）で変更できます。`Quarterly`（四半期）を使う場合は、NotionのBillingセレクトに `Quarterly` の選択肢を追加してください。
+> 列名はコード冒頭の定数（`PROP_URL` など）で変更できます。3ヶ月ごとの契約は、NotionのBillingセレクトに `Quarterly`（または `Every 3 months` / `3 months`）の選択肢を追加してください。
 >
-> 「解約URL」「解約方法」が空でも、主要サービス（Netflix / YouTube Premium / Spotify / Amazonプライム / Kindle Unlimited / U-NEXT / Disney+ / ChatGPT / Claude / Adobe / Microsoft 365 / Apple系）は組み込みの解約ページ・手順を案内し、それ以外はGoogle検索のリンクを返します。サービス側のURLは変わることがあるので、確実にしたいものはNotionに書いておくのがおすすめです。
+> 「解約用URL」「再契約URL」が空でも、主要サービス（Netflix / YouTube Premium / Spotify / Amazonプライム / Kindle Unlimited / U-NEXT / Disney+ / ChatGPT / Claude / Adobe / Microsoft 365 / Apple系）は組み込みの解約ページ・手順を案内し、それ以外はGoogle検索のリンクを返します。サービス側のURLは変わることがあるので、確実にしたいものはNotionに書いておくのがおすすめです。
 
 2. **Notion API（無料）を取得する**
 * [Notion My Integrations](https://www.notion.so/my-integrations)から新しいインテグレーションを作成し、`Internal Integration Secret`（トークン）を控えてください。

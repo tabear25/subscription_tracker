@@ -90,6 +90,8 @@ function testLogic() {
     formatYmd(calculateNextPaymentDate(new Date(2028, 1, 29), 'Yearly')), '2029-02-28');
   check('Quarterly: 11/30 → 2/28',
     formatYmd(calculateNextPaymentDate(new Date(2026, 10, 30), 'Quarterly')), '2027-02-28');
+  check('Notionの選択肢「Every 3 months」「3 months」も3ヶ月ごと',
+    [billingMonths('Every 3 months'), billingMonths('3 months'), monthlyEquivalent(3000, 'Every 3 months')], [3, 3, 1000]);
 
   // --- 過去の支払日の繰り上げ（31日払いが数サイクル遅れても31日のまま） ---
   const oct2 = new Date(2026, 9, 2);
@@ -165,6 +167,18 @@ function testLogic() {
   check('nameRemainder: 未登録の名前', nameRemainder(normalizeText('Hulu 解約したい')), 'hulu');
   check('nameRemainder: 一般的な語は残さない', nameRemainder(normalizeText('支払いスケジュール')), '');
 
+  // --- 名前どおりのページが解約済みなら、その名前を含む契約中のページに読み替える ---
+  const bundlePages = [
+    { pageId: 'l', name: 'LYP Premium with Netflix', status: 'Active', aliases: [] },
+    { pageId: 'n', name: 'Netflix', status: 'Canceled', aliases: [] }
+  ];
+  const resolve = (action, text) => {
+    const r = resolveTargets({ action: action }, text, bundlePages, null);
+    return [r.source, r.targets.map(p => p.pageId)];
+  };
+  check('読み替え: 解約したい → 契約中のLYP', resolve('cancelWant', 'Netflix解約したい'), ['related', ['l']]);
+  check('読み替えなし: 再契約したい → 解約済みのNetflix', resolve('reactivateWant', 'Netflix再契約したい'), ['exact', ['n']]);
+
   // --- 名前を省いた発言の扱い（文脈） ---
   const ctxPages = [{ pageId: 'n', name: 'Netflix', status: 'Active' }, { pageId: 's', name: 'Spotify', status: 'Active' }];
   const ids = list => list.map(p => p.pageId);
@@ -188,7 +202,7 @@ function testLogic() {
   check('支払方法の判定',
     ['App Store', 'Apple Pay', 'Google Play', 'au', 'auかんたん決済', 'クレジットカード'].map(detectBillingStore),
     ['apple', null, 'google', 'carrier', 'carrier', null]);
-  check('解約方法: Notionの解約URLが最優先',
+  check('解約方法: Notionの解約用URLが最優先',
     resolveCancelProcedure({ name: 'Netflix', cancelUrl: 'https://example.com/cancel', paymentMethod: 'App Store' }).url,
     'https://example.com/cancel');
   check('解約方法: App Store経由ならAppleのページ',
@@ -200,6 +214,14 @@ function testLogic() {
   check('解約方法: 情報が無ければ検索リンク',
     [resolveCancelProcedure({ name: 'ジム' }).fallback, resolveCancelProcedure({ name: 'ジム' }).searchUrl.indexOf('https://www.google.com/search?q=') === 0],
     [true, true]);
+  check('解約方法: 最後の手段は「URL」（契約管理ページ）',
+    resolveCancelProcedure({ name: 'ジム', url: 'https://example.com/mypage' }).url, 'https://example.com/mypage');
+  check('再契約の方法: 「再契約URL」が最優先',
+    resolveRestartProcedure({ name: 'Netflix', restartUrl: 'https://example.com/join', url: 'https://example.com/account' }).url,
+    'https://example.com/join');
+  check('組み込みの解約ページは名前がサービス名で始まるときだけ（バンドル契約を取り違えない）',
+    [!!findServicePreset('Netflix'), !!findServicePreset('LYP Premium with Netflix'), !!findServicePreset('Disneyplus (JP)')],
+    [true, false, true]);
 
   // --- LINEのボタン・リマインド文 ---
   // LINEは絵文字を2文字と数える（UTF-16）ので String.length で20以内

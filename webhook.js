@@ -119,13 +119,20 @@ function buildReply(intent, resolved, pages, today) {
     if (action === 'none') return unknownReply(notFound);
     return askWhichReply(action, defaultCandidates(action, pages, today), notFound);
   }
-  // 名前の一部や文脈から複数に絞りきれないときは、取り違えないよう聞き返す
-  if (targets.length > 1 && resolved.source !== 'exact') {
-    return askWhichReply(action, targets, resolved.source === 'partial' ? 'いくつか当てはまりました。' : '');
+  const relatedNote = resolved.source === 'related'
+    ? `「${resolved.original.map(p => p.name).join('」「')}」は${statusLabel(resolved.original[0])}です。` : '';
+  // 名前の一部や文脈から複数に絞りきれないときや、別名の契約に読み替えて状態を変えるときは、取り違えないよう聞き返す
+  if ((targets.length > 1 && resolved.source !== 'exact') || (relatedNote && STATE_CHANGING[action])) {
+    return askWhichReply(action, targets, relatedNote || (resolved.source === 'partial' ? 'いくつか当てはまりました。' : ''));
   }
   const handler = TARGET_HANDLERS[action] || infoReply; // 問い合わせ（いつ/いくら/名前だけ）は情報カード
-  return combineReplies(targets.slice(0, MAX_TARGETS_PER_MESSAGE).map(page => handler(page, today)));
+  const reply = combineReplies(targets.slice(0, MAX_TARGETS_PER_MESSAGE).map(page => handler(page, today)));
+  if (relatedNote) reply.text = `ℹ️ ${relatedNote}契約中の「${targets[0].name}」について答えます。\n\n${reply.text}`;
+  return reply;
 }
+
+// Notionの状態を変える操作（読み替えで対象を決めたときは実行前に確認する）
+const STATE_CHANGING = { cancelDone: true, reactivateDone: true, keep: true, used: true };
 
 // =====================================================================
 // 発言の意図を読み取る
@@ -227,11 +234,32 @@ function resolveTargets(intent, text, pages, context) {
     source = 'context';
   }
   const wantActive = !PREFERS_INACTIVE[intent.action];
-  const preferred = targets.filter(p => isActive(p) === wantActive);
-  if (preferred.length > 0) targets = preferred;
-  // 文脈から拾ったサービスが意図に合わない状態なら（契約中のものを「再契約したい」など）、候補から聞き直す
-  else if (source === 'context') targets = [];
-  return { targets: targets, source: source, rest: mention.rest };
+  const fits = p => isActive(p) === wantActive;
+  const preferred = targets.filter(fits);
+  const original = targets;
+  if (preferred.length > 0) {
+    targets = preferred;
+  } else if (source === 'context') {
+    // 文脈から拾ったサービスが意図に合わない状態なら（契約中のものを「再契約したい」など）、候補から聞き直す
+    targets = [];
+  } else if (source === 'exact') {
+    // 名前どおりのページが意図に合わない状態なら、その名前を含む別の契約を探す
+    // （例: Notionの「Netflix」は解約済みで、いま契約中なのは「LYP Premium with Netflix」）
+    const related = relatedPages(targets, pages).filter(fits);
+    if (related.length > 0) {
+      targets = related;
+      source = 'related';
+    }
+  }
+  return { targets: targets, source: source, rest: mention.rest, original: original };
+}
+
+// matched の名前（呼び名を含む）を、単語として名前に含む別のページ
+function relatedPages(matched, pages) {
+  const names = [];
+  matched.forEach(m => pageNameKeys(m).forEach(k => { if (names.indexOf(k.key) === -1) names.push(k.key); }));
+  return pages.filter(p => matched.indexOf(p) === -1 &&
+    pageNameKeys(p).some(k => names.some(n => findKeyInText(k.key, n) !== -1)));
 }
 
 function contextPages(action, norm, rest, pages, context) {
@@ -445,7 +473,7 @@ function cancelGuideReply(page, today) {
   const next = nextPaymentDate(page, today);
   if (next && !next.stale) lines.push(cancelDeadlineHint(next.date, daysBetween(today, next.date), today));
   lines.push('');
-  procedureLines(resolveCancelProcedure(page), '解約方法', '💡 Notionの「解約URL」「解約方法」に書いておくと、ここに表示します。')
+  procedureLines(resolveCancelProcedure(page), '解約方法', '💡 Notionの「解約用URL」「解約方法」に書いておくと、ここに表示します。')
     .forEach(l => lines.push(l));
   lines.push('');
   lines.push(`手続きが終わったら「${page.name} 解約済み」と送ってください（下のボタンでもOK）。Notionを解約済みにして通知を止めます。`);
@@ -530,7 +558,7 @@ function reactivateGuideReply(page, today) {
     };
   }
   const lines = [`🔄 ${page.name} の再契約`, ''];
-  procedureLines(resolveRestartProcedure(page), '再契約の方法', '💡 Notionの「URL」に再契約ページを書いておくと、ここに表示します。')
+  procedureLines(resolveRestartProcedure(page), '再契約の方法', '💡 Notionの「再契約URL」に申し込みページを書いておくと、ここに表示します。')
     .forEach(l => lines.push(l));
   lines.push('');
   lines.push(`今日再契約した場合の次回支払日（目安）: ${formatDateJa(estimateRestartPaymentDate(page, today), today)}`);
@@ -806,7 +834,8 @@ function unknownReply(lead) {
 
 // =====================================================================
 // 解約・再契約の方法
-//  優先順: Notionの「解約URL」「解約方法」 > 「支払方法」（App Store等） > 組み込みの主要サービス > Google検索
+//  解約: Notionの「解約用URL」「解約方法」 > 「支払方法」（App Store等） > 組み込みの主要サービス > 「URL」（契約管理ページ） > Google検索
+//  再契約: Notionの「再契約URL」 > 「URL」 > 「支払方法」 > 組み込みの主要サービス > Google検索
 // =====================================================================
 
 // App Store / Google Play / キャリア経由の課金は、サービスのWebサイトではなくそちらで解約する
@@ -834,9 +863,9 @@ const BILLING_STORES = {
   }
 };
 
-// よく使われるサービスの解約ページ（参考）。names は「Notionの名前にこれが含まれていたら該当」かつ
+// よく使われるサービスの解約ページ（参考）。names は「Notionの名前がこれで始まっていたら該当」かつ
 // 「LINEでこの呼び名でも通じる」（正規化後の小文字で書く）。画面やURLはサービス側の都合で
-// 変わることがあるため、合わなくなったらNotionの「解約URL」「解約方法」に正しいものを書けば優先される。
+// 変わることがあるため、合わなくなったらNotionの「解約用URL」「再契約URL」に正しいものを書けば優先される。
 const SERVICE_PRESETS = [
   { names: ['netflix', 'ネットフリックス', 'ネトフリ'],
     cancelUrl: 'https://www.netflix.com/cancelplan', homeUrl: 'https://www.netflix.com/' },
@@ -878,12 +907,13 @@ const SERVICE_PRESETS = [
   { names: ['apple arcade'], store: 'apple' }
 ];
 
+// 名前がサービス名で始まるものだけ該当とみなす（「LYP Premium with Netflix」をNetflixとして扱わないため）
 function findServicePreset(name) {
   const n = normalizeText(name);
   if (!n) return null;
   const compact = n.replace(/ /g, '');
   return SERVICE_PRESETS.find(preset =>
-    preset.names.some(k => n.indexOf(k) !== -1 || compact.indexOf(k.replace(/ /g, '')) !== -1)) || null;
+    preset.names.some(k => n.indexOf(k) === 0 || compact.indexOf(k.replace(/ /g, '')) === 0)) || null;
 }
 
 // Notionの「支払方法」から、どこで解約するかを判定する
@@ -901,7 +931,7 @@ function resolveCancelProcedure(page) {
   const storeKey = detectBillingStore(page.paymentMethod) || (preset && preset.store) || null;
   const store = storeKey ? BILLING_STORES[storeKey] : null;
   const curated = !!(page.cancelUrl || page.cancelHowto); // Notionに自分で書いた手順がある
-  const url = page.cancelUrl || (store ? store.url : preset && (preset.cancelUrl || preset.homeUrl)) || null;
+  const url = page.cancelUrl || (store ? store.url : preset && (preset.cancelUrl || preset.homeUrl)) || page.url || null;
   const steps = page.cancelHowto || (store ? store.steps : preset && preset.steps) || null;
   const notes = [];
   if (store) notes.push(store.note);
@@ -923,7 +953,7 @@ function resolveRestartProcedure(page) {
   const preset = findServicePreset(page.name);
   const storeKey = detectBillingStore(page.paymentMethod) || (preset && preset.store) || null;
   const store = storeKey ? BILLING_STORES[storeKey] : null;
-  const url = page.url || (store ? store.url : preset && (preset.homeUrl || preset.cancelUrl)) || null;
+  const url = page.restartUrl || page.url || (store ? store.url : preset && (preset.homeUrl || preset.cancelUrl)) || null;
   const steps = store ? store.restartSteps : null;
   return {
     via: store ? store.label : null,

@@ -116,8 +116,12 @@ function createEnv({ now, pages = [], props = {}, notionDown = false }) {
 function page(id, o) {
   const select = name => ({ type: 'select', select: name ? { name } : null });
   const text = s => ({ type: 'rich_text', rich_text: s ? [{ plain_text: s }] : [] });
+  const url = s => ({ type: 'url', url: s || null });
   return { id, properties: {
-    Name: { type: 'title', title: [{ plain_text: o.name }] },
+    Name: { type: 'title', title: o.name ? [{ plain_text: o.name }] : [] },
+    URL: url(o.url),
+    '解約用URL': url(o.cancelUrl),
+    '再契約URL': url(o.restartUrl),
     '更新日': { type: 'date', date: o.date ? { start: o.date } : null },
     '料金': { type: 'number', number: o.price === undefined ? null : o.price },
     Billing: select(o.billing),
@@ -202,6 +206,26 @@ test('会話: 特定できないときはボタンで聞き返す・誤操作し
   assert.match(env.say('解約した').text, /どのサービスを解約済みにしますか？/); // 案内していないので文脈は使わない
   assert.match(env.say('Hulu 解約したい').text, /「hulu」はNotionに見つかりませんでした/);
   assert.strictEqual(env.patches.length, 0);
+});
+
+test('会話: Notionの「解約用URL」「再契約URL」を優先し、バンドル契約を取り違えない', () => {
+  const env = createEnv({ now: '2026-10-02T10:00:00+09:00', props: { ALLOWED_LINE_USER_IDS: 'U1' }, pages: [
+    page('claude', { name: 'Claude', date: '2026-10-10', price: 21140, billing: 'Monthly', status: 'Active',
+      url: 'https://claude.ai/settings', cancelUrl: 'https://claude.ai/settings/billing', restartUrl: 'https://claude.ai/upgrade' }),
+    page('lyp', { name: 'LYP Premium with Netflix', date: '2026-10-25', price: 2290, billing: 'Monthly', status: 'Active',
+      cancelUrl: 'https://premium.lycorp.co.jp/cancel' }),
+    page('netflix', { name: 'Netflix', date: '2026-02-28', billing: 'Monthly', status: 'Canceled',
+      restartUrl: 'https://www.netflix.com/signup' }),
+    page('blank', { name: '' })
+  ] });
+  const claude = env.say('Claude解約したい').text;
+  assert.match(claude, /🔗 https:\/\/claude\.ai\/settings\/billing/);
+  assert.doesNotMatch(claude, /App Store・Google Play/); // 自分で書いたURLがあれば一般的な注意は出さない
+  const lyp = env.say('ネトフリ解約したい').text;       // 契約中のNetflixはLYP経由のもの
+  assert.match(lyp, /LYP Premium with Netflix の解約[\s\S]*premium\.lycorp\.co\.jp\/cancel/);
+  assert.doesNotMatch(lyp, /netflix\.com\/cancelplan/);
+  assert.match(env.say('Netflix再契約したい').text, /🔗 https:\/\/www\.netflix\.com\/signup/);
+  assert.doesNotMatch(env.say('解約済み一覧').text, /No Name/); // 名前が空の行は出さない
 });
 
 test('会話: 許可されていないユーザーは操作できない', () => {

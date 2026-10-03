@@ -36,11 +36,12 @@ const ACTIVE_VALUE = 'Active';
 const CANCELED_VALUE = 'Canceled'; // LINEの「解約」コマンドで設定するステータス
 
 // 追加機能用の列名（無くてもエラーにせず、その機能だけスキップする）
-const PROP_URL = 'URL';             // 値上げ検知/再契約誘導に使うサービスのURL（URL型 or テキスト型）
+const PROP_URL = 'URL';             // サービスのアカウント（契約管理）ページ。値上げ検知のチェック先、解約・再契約リンクの予備にも使う（URL型 or テキスト型）
 const PROP_PRICE_WATCH = '価格監視'; // チェックボックス。ONのサービスだけ価格チェックする
 const PROP_PRICE_CHECKED = '料金確認日'; // 日付。価格を自動チェックした最終日（月1の判定と二重チェック防止に使う）
 const PROP_LAST_USED = '最終利用日'; // 日付。最後にそのサービスを使った日（未使用検知に使う）
-const PROP_CANCEL_URL = '解約URL';     // 解約ページのURL（URL型 or テキスト型）。LINEの解約案内で最優先に表示する
+const PROP_CANCEL_URL = '解約用URL';   // 解約ページのURL（URL型 or テキスト型）。LINEの解約案内で最優先に表示する
+const PROP_RESTART_URL = '再契約URL';  // 申し込み（再契約）ページのURL（URL型 or テキスト型）。LINEの再契約案内で最優先に表示する
 const PROP_CANCEL_HOWTO = '解約方法';  // 解約の手順メモ（テキスト型）
 const PROP_PAYMENT_METHOD = '支払方法'; // 「App Store」「Google Play」「docomo」など（セレクト型 or テキスト型）。解約先の案内を切り替える
 const PROP_ALIASES = '別名';           // LINEで呼ぶときの別名（カンマ区切り。例: ネトフリ）
@@ -191,7 +192,10 @@ function fetchAllNotionPages() {
       return null;
     }
     const data = JSON.parse(res.getContentText());
-    (data.results || []).forEach(page => pages.push(parseNotionPage(page)));
+    (data.results || []).forEach(page => {
+      const title = page.properties && page.properties[PROP_NAME] && page.properties[PROP_NAME].title;
+      if (title && title.some(t => (t.plain_text || '').trim())) pages.push(parseNotionPage(page)); // 名前が空の行は無視
+    });
     if (!data.has_more || !data.next_cursor) break;
     cursor = data.next_cursor;
   }
@@ -267,6 +271,7 @@ function parseNotionPage(page) {
 
   // 解約・再契約の案内用（任意の列）
   const cancelUrl = propText(props[PROP_CANCEL_URL]);
+  const restartUrl = propText(props[PROP_RESTART_URL]);
   const cancelHowto = propText(props[PROP_CANCEL_HOWTO]);
   const paymentMethod = propText(props[PROP_PAYMENT_METHOD]);
   const aliasText = propText(props[PROP_ALIASES]);
@@ -278,7 +283,7 @@ function parseNotionPage(page) {
   return {
     pageId: page.id, name, date: dateStr, price, priceNumber, billing, status,
     url, priceWatch, priceCheckedDate, lastUsed,
-    cancelUrl, cancelHowto, paymentMethod, aliases, statusType
+    cancelUrl, restartUrl, cancelHowto, paymentMethod, aliases, statusType
   };
 }
 
@@ -302,7 +307,9 @@ function calculateNextPaymentDate(currentDate, billingType) {
 function billingMonths(billingType) {
   switch (billingType) {
     case 'Monthly': return 1;
-    case 'Quarterly': return 3; // 四半期（3ヶ月ごと）
+    case 'Quarterly':      // 四半期（3ヶ月ごと）。Notionの選択肢名の揺れも同じ扱いにする
+    case 'Every 3 months':
+    case '3 months': return 3;
     case 'Yearly': return 12;
     case '2 years': return 24;
     default: return null;
@@ -418,11 +425,12 @@ function describeDaysUntil(days) {
   return `${-days}日前`;
 }
 
-const BILLING_LABELS = { 'Monthly': '毎月', 'Quarterly': '3ヶ月ごと', 'Yearly': '毎年', '2 years': '2年ごと' };
-const BILLING_SHORT_LABELS = { 'Monthly': '月', 'Quarterly': '3ヶ月', 'Yearly': '年', '2 years': '2年' };
+// 課金サイクル（月数）の表示名
+const BILLING_LABELS = { 1: '毎月', 3: '3ヶ月ごと', 12: '毎年', 24: '2年ごと' };
+const BILLING_SHORT_LABELS = { 1: '月', 3: '3ヶ月', 12: '年', 24: '2年' };
 
 function billingLabel(billing) {
-  return BILLING_LABELS[billing] || 'サイクル未設定';
+  return BILLING_LABELS[billingMonths(billing)] || 'サイクル未設定';
 }
 
 function priceText(task) {
@@ -436,7 +444,7 @@ function priceWithCycle(task) {
 
 // 「¥1,490/月」
 function priceShort(task) {
-  const cycle = BILLING_SHORT_LABELS[task.billing];
+  const cycle = BILLING_SHORT_LABELS[billingMonths(task.billing)];
   return cycle ? `${priceText(task)}/${cycle}` : priceText(task);
 }
 
@@ -650,11 +658,8 @@ function rememberNotifiedServices(notifiedIds, remindedIds) {
 // 課金サイクルを月額換算する。未知/未設定の billing は 0 を返す。
 function monthlyEquivalent(priceNumber, billing) {
   if (priceNumber === null || priceNumber === undefined) return 0;
-  if (billing === 'Monthly') return priceNumber;
-  if (billing === 'Quarterly') return priceNumber / 3;
-  if (billing === 'Yearly') return priceNumber / 12;
-  if (billing === '2 years') return priceNumber / 24;
-  return 0;
+  const months = billingMonths(billing);
+  return months ? priceNumber / months : 0;
 }
 
 // 月末日かどうか（翌日が1日なら末日）。月の長さ（28/29/30/31）を問わず正しく判定する。

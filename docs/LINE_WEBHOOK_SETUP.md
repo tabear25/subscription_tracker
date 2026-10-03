@@ -47,10 +47,11 @@ LINEのトークにふつうの文章を送るだけで、サブスクの**支�
 
 解約方法は次の順で案内します。
 
-1. Notionの「解約URL」「解約方法」列（自分で書いたものが最優先）
+1. Notionの「解約用URL」「解約方法」列（自分で書いたものが最優先。再契約の案内は「再契約URL」列）
 2. 「支払方法」列が App Store / Google Play / キャリアなら、その解約手順（サービスのサイトからは解約できないため）
 3. 主要サービスの組み込みの解約ページ・手順（Netflix・YouTube Premium・Spotify・Amazonプライム・Kindle Unlimited・U-NEXT・Disney+・ChatGPT・Claude・Adobe・Microsoft 365・Apple系）
-4. どれも無ければ Google 検索のリンク
+4. Notionの「URL」列（契約管理ページ）
+5. どれも無ければ Google 検索のリンク
 
 ---
 
