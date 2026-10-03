@@ -81,12 +81,133 @@ function testLogic() {
   check('detectUnusedTasks: 古いものだけ',
     detectUnusedTasks(tasks, today).map(t => t.name), ['古い']);
 
-  // --- コマンド解析（webhook.js） ---
-  check('parseCommand: 一覧', parseCommand('一覧'), { action: 'list' });
-  check('parseCommand: 解約', parseCommand('解約 Netflix'), { action: 'cancel', name: 'Netflix' });
-  check('parseCommand: 使った', parseCommand('使った Spotify'), { action: 'used', name: 'Spotify' });
-  check('parseCommand: 再開', parseCommand('再開 Disney Plus'), { action: 'reactivate', name: 'Disney Plus' });
-  check('parseCommand: 不明', parseCommand('こんにちは'), { action: 'unknown' });
+  // --- 月末の支払日: 存在しない日は月末にそろえる（2月分を飛ばさない） ---
+  check('Monthly: 1/31 → 2/28',
+    formatYmd(calculateNextPaymentDate(new Date(2026, 0, 31), 'Monthly')), '2026-02-28');
+  check('Monthly: うるう年 1/31 → 2/29',
+    formatYmd(calculateNextPaymentDate(new Date(2028, 0, 31), 'Monthly')), '2028-02-29');
+  check('Yearly: 2/29 → 翌年2/28',
+    formatYmd(calculateNextPaymentDate(new Date(2028, 1, 29), 'Yearly')), '2029-02-28');
+  check('Quarterly: 11/30 → 2/28',
+    formatYmd(calculateNextPaymentDate(new Date(2026, 10, 30), 'Quarterly')), '2027-02-28');
+
+  // --- 過去の支払日の繰り上げ（31日払いが数サイクル遅れても31日のまま） ---
+  const oct2 = new Date(2026, 9, 2);
+  check('rollForward: 8/31 Monthly → 10/31',
+    formatYmd(rollForwardPaymentDate(new Date(2026, 7, 31), 'Monthly', oct2)), '2026-10-31');
+  check('rollForward: 未来日はそのまま',
+    formatYmd(rollForwardPaymentDate(new Date(2026, 9, 15), 'Monthly', oct2)), '2026-10-15');
+  check('rollForward: Billing不明の過去日はそのまま',
+    formatYmd(rollForwardPaymentDate(new Date(2026, 8, 1), null, oct2)), '2026-09-01');
+  check('nextPaymentDate: 日付未登録はnull', nextPaymentDate({ date: null, billing: 'Monthly' }, oct2), null);
+  check('nextPaymentDate: Billing不明の過去日はstale',
+    nextPaymentDate({ date: '2026-09-01', billing: null }, oct2).stale, true);
+
+  // --- 期間内の支払日 ---
+  const monthlyTask = { date: '2026-10-05', billing: 'Monthly' };
+  check('paymentDatesBetween: 30日間に1回',
+    paymentDatesBetween(monthlyTask, oct2, new Date(2026, 9, 31)).map(formatYmd), ['2026-10-05']);
+  check('paymentDatesBetween: 60日間に2回',
+    paymentDatesBetween(monthlyTask, oct2, new Date(2026, 10, 30)).map(formatYmd), ['2026-10-05', '2026-11-05']);
+  check('paymentDatesBetween: 期間外の年払いは0回',
+    paymentDatesBetween({ date: '2027-03-01', billing: 'Yearly' }, oct2, new Date(2026, 9, 31)), []);
+  check('describeDaysUntil', [0, 1, 13, -3].map(describeDaysUntil), ['今日', '明日', 'あと13日', '3日前']);
+
+  // --- LINEの文章から意図を読み取る（webhook.js） ---
+  const intents = [
+    ['Netflixっていつ支払いだっけ？', 'payment'],
+    ['Netflix解約したい', 'cancelWant'],
+    ['解約 Netflix', 'cancelWant'],
+    ['Netflixやめよっかな', 'cancelWant'],
+    ['Netflix解約したら いつまで使える？', 'cancelWant'],
+    ['Ｎｅｔｆｌｉｘ　解約したい？', 'cancelWant'],
+    ['Netflix解約した', 'cancelDone'],
+    ['Netflix 解約済み', 'cancelDone'],
+    ['Netflix解約しといた', 'cancelDone'],
+    ['Netflix やめた', 'cancelDone'],
+    ['解約したけど再契約したい', 'reactivateWant'],
+    ['再開 Disney Plus', 'reactivateWant'],
+    ['Netflix再契約した', 'reactivateDone'],
+    ['Netflix 続ける', 'keep'],
+    ['Netflix 解約取り消し', 'keep'],
+    ['やっぱり解約しない', 'keep'],
+    ['使った Spotify', 'used'],
+    ['Netflix使ったのいつ？', 'payment'],
+    ['今月あといくら払う？', 'payment'],
+    ['来月いくら？', 'cost'],
+    ['一覧', 'list'],
+    ['解約済み一覧', 'canceledList'],
+    ['ヘルプ', 'help'],
+    ['こんにちは', 'none']
+  ];
+  intents.forEach(([text, expected]) => check(`detectIntent: ${text}`, detectIntent(text).action, expected));
+  check('detectIntent: 来月の期間', detectIntent('来月の支払い').window, { type: 'month', offset: 1, explicit: true });
+
+  // --- 文章に出てくるサービスを探す ---
+  const pages = [
+    { pageId: 'n', name: 'Netflix', status: 'Active', aliases: [] },
+    { pageId: 'd', name: 'Disney Plus', status: 'Canceled', aliases: [] },
+    { pageId: 'p', name: 'Prime', status: 'Active', aliases: [] },
+    { pageId: 'pv', name: 'Prime Video', status: 'Active', aliases: [] },
+    { pageId: 'x', name: 'X', status: 'Active', aliases: [] },
+    { pageId: 'a', name: 'Adobe Creative Cloud', status: 'Active', aliases: ['アドビ'] }
+  ];
+  const mentioned = text => findMentionedPages(text, pages).pages.map(p => p.pageId);
+  check('findMentionedPages: 名前', mentioned('Netflixっていつ支払い？'), ['n']);
+  check('findMentionedPages: 組み込みの呼び名', mentioned('ネトフリ解約したい'), ['n']);
+  check('findMentionedPages: Notionの別名', mentioned('アドビ いつ'), ['a']);
+  check('findMentionedPages: 長いほうを優先', mentioned('prime video 解約'), ['pv']);
+  check('findMentionedPages: 英字は単語の途中で当てない', mentioned('netflix 解約'), ['n']);
+  check('findMentionedPages: 1文字の名前', mentioned('x 解約'), ['x']);
+  check('findMentionedPages: 名前の一部', mentioned('disney 再契約したい'), ['d']);
+  check('findMentionedPages: 2つ', mentioned('NetflixとXいつ？'), ['n', 'x']);
+  check('nameRemainder: 名前なし', nameRemainder(normalizeText('解約したい')), '');
+  check('nameRemainder: 未登録の名前', nameRemainder(normalizeText('Hulu 解約したい')), 'hulu');
+  check('nameRemainder: 一般的な語は残さない', nameRemainder(normalizeText('支払いスケジュール')), '');
+
+  // --- 名前を省いた発言の扱い（文脈） ---
+  const ctxPages = [{ pageId: 'n', name: 'Netflix', status: 'Active' }, { pageId: 's', name: 'Spotify', status: 'Active' }];
+  const ids = list => list.map(p => p.pageId);
+  check('文脈: 解約案内の直後の「解約した」は使う',
+    ids(contextPages('cancelDone', '解約した', '', ctxPages, { ids: ['n'], intent: 'cancelWant' })), ['n']);
+  check('文脈: 案内なしの「解約した」は使わない',
+    ids(contextPages('cancelDone', '解約した', '', ctxPages, { ids: ['n'], intent: 'info' })), []);
+  check('文脈: 問い合わせは「これ」のときだけ',
+    [ids(contextPages('payment', 'いつ?', '', ctxPages, { ids: ['n'], intent: 'info' })),
+     ids(contextPages('payment', 'これいつ?', '', ctxPages, { ids: ['n'], intent: 'info' }))], [[], ['n']]);
+  check('文脈: 複数の話題は「これ」のときだけ',
+    [ids(contextPages('cancelWant', '解約したい', '', ctxPages, { ids: ['n', 's'], intent: 'info' })),
+     ids(contextPages('cancelWant', 'これ解約したい', '', ctxPages, { ids: ['n', 's'], intent: 'info' }))], [[], ['n', 's']]);
+  const now = new Date(2026, 9, 2, 12, 0).getTime();
+  check('文脈: 期限内で新しいほう',
+    pickConversationContext({ ids: ['n'], at: now - 60 * 1000 }, { ids: ['s'], at: now - 3600 * 1000 }, now).ids, ['n']);
+  check('文脈: 期限切れは無視',
+    pickConversationContext({ ids: ['n'], at: now - 3 * 3600 * 1000 }, null, now), null);
+
+  // --- 解約方法の案内 ---
+  check('支払方法の判定',
+    ['App Store', 'Apple Pay', 'Google Play', 'au', 'auかんたん決済', 'クレジットカード'].map(detectBillingStore),
+    ['apple', null, 'google', 'carrier', 'carrier', null]);
+  check('解約方法: Notionの解約URLが最優先',
+    resolveCancelProcedure({ name: 'Netflix', cancelUrl: 'https://example.com/cancel', paymentMethod: 'App Store' }).url,
+    'https://example.com/cancel');
+  check('解約方法: App Store経由ならAppleのページ',
+    resolveCancelProcedure({ name: 'Netflix', paymentMethod: 'App Store' }).url, 'https://apps.apple.com/account/subscriptions');
+  check('解約方法: 主要サービスは組み込みのページ',
+    resolveCancelProcedure({ name: 'Netflix' }).url, 'https://www.netflix.com/cancelplan');
+  check('解約方法: キャリア決済ならサービスのページを出さない',
+    resolveCancelProcedure({ name: 'Netflix', paymentMethod: 'docomo' }).url, null);
+  check('解約方法: 情報が無ければ検索リンク',
+    [resolveCancelProcedure({ name: 'ジム' }).fallback, resolveCancelProcedure({ name: 'ジム' }).searchUrl.indexOf('https://www.google.com/search?q=') === 0],
+    [true, true]);
+
+  // --- LINEのボタン・リマインド文 ---
+  // LINEは絵文字を2文字と数える（UTF-16）ので String.length で20以内
+  const longLabel = quickReplyItem('🛑 Adobe Creative Cloud コンプリートプラン', 'x').action.label;
+  check('ボタン名は20文字以内（絵文字は2文字）', longLabel.length <= 20 && longLabel.indexOf('🛑') === 0, true);
+  check('絵文字の途中で切らない', truncateChars('🛑🛑🛑', 4), '🛑…');
+  check('解約リマインド文',
+    buildCancelReminderMessage({ name: 'Netflix', price: '¥1,490' }, new Date(2026, 9, 5), 3).indexOf('Netflix（¥1,490）') !== -1, true);
 
   console.log(`\n結果: ${pass} 件成功 / ${fail} 件失敗`);
 }
