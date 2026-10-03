@@ -36,10 +36,31 @@ const ACTIVE_VALUE = 'Active';
 const CANCELED_VALUE = 'Canceled'; // LINEの「解約」コマンドで設定するステータス
 
 // 追加機能用の列名（無くてもエラーにせず、その機能だけスキップする）
-const PROP_URL = 'URL';             // 値上げ検知/再契約誘導に使うサービスのURL（URL型 or テキスト型）
+const PROP_URL = 'URL';             // サービスのアカウント（契約管理）ページ。値上げ検知のチェック先、解約・再契約リンクの予備にも使う（URL型 or テキスト型）
 const PROP_PRICE_WATCH = '価格監視'; // チェックボックス。ONのサービスだけ価格チェックする
 const PROP_PRICE_CHECKED = '料金確認日'; // 日付。価格を自動チェックした最終日（月1の判定と二重チェック防止に使う）
 const PROP_LAST_USED = '最終利用日'; // 日付。最後にそのサービスを使った日（未使用検知に使う）
+const PROP_CANCEL_URL = '解約用URL';   // 解約ページのURL（URL型 or テキスト型）。LINEの解約案内で最優先に表示する
+const PROP_RESTART_URL = '再契約URL';  // 申し込み（再契約）ページのURL（URL型 or テキスト型）。LINEの再契約案内で最優先に表示する
+const PROP_CANCEL_HOWTO = '解約方法';  // 解約の手順メモ（テキスト型）
+const PROP_PAYMENT_METHOD = '支払方法'; // 「App Store」「Google Play」「docomo」など（セレクト型 or テキスト型）。解約先の案内を切り替える
+const PROP_ALIASES = '別名';           // LINEで呼ぶときの別名（カンマ区切り。例: ネトフリ）
+
+// 「解約したい」と言ったまま「解約済み」の連絡がないサービスに、支払日の何日前にLINEで確認するか
+const CANCEL_REMINDER_DAYS = [3, 1];
+
+// 「これ解約したい」のような返信を、その日に通知したサービスとして扱う時間
+const BROADCAST_CONTEXT_TTL_HOURS = 24;
+// 「これ」「それ」や名前なしの続きの発言を、直前にLINEで話したサービスとして扱う時間
+const CONTEXT_TTL_MINUTES = 120;
+
+// スクリプトプロパティに保存する状態のキー（ツールが自動で書き込む。手動設定は不要）
+const PENDING_CANCELS_KEY = 'PENDING_CANCELS';  // 解約手続き待ちのサービス
+const CONTEXT_KEY_PREFIX = 'LINE_CONTEXT_';     // 直前に話題にしたサービス（会話の文脈）
+
+// LINE Messaging API の上限
+const LINE_TEXT_MAX = 5000;
+const QUICK_REPLY_MAX = 13;
 
 function main() {
   try {
@@ -54,26 +75,24 @@ function main() {
 
 // 毎日トリガーから呼ばれる本体。
 function runDailyCheck() {
-  const tasks = fetchNotionData() || [];
+  const fetched = fetchNotionData();
+  const tasks = fetched || [];
 
   const today = startOfToday();
+  const pending = loadPendingCancels();
+  const withButtons = isLineTwoWayEnabled();
+  const notifiedIds = [];
+  const remindedIds = [];
 
   tasks.forEach(task => {
-    if (!task.date) return;
-
-    let paymentDate = new Date(task.date);
-    paymentDate.setHours(0, 0, 0, 0);
+    let paymentDate = parseYmd(task.date);
+    if (!paymentDate) return;
 
     if (paymentDate < today) {
-      // 過去日が複数サイクル分たまっていても、今日以降になるまで繰り上げ続ける。
+      // 過去日が複数サイクル分たまっていても、今日以降になるまで繰り上げる。
       // 1回だけの繰り上げだと過去日のまま残り、「7日前ちょうど」の通知条件を
       // 飛び越えて支払予告が送られないことがあるため。
-      let newDate = paymentDate;
-      while (newDate < today) {
-        const advanced = calculateNextPaymentDate(newDate, task.billing);
-        if (!advanced) break; // billing 不明などで進められない場合は中断（無限ループ防止）
-        newDate = advanced;
-      }
+      const newDate = rollForwardPaymentDate(paymentDate, task.billing, today);
       if (newDate.getTime() !== paymentDate.getTime()) {
         updateNotionDate(task.pageId, newDate);
         console.log(`🔄 自動更新: ${task.name} を ${formatDate(paymentDate)} から ${formatDate(newDate)} に変更`);
@@ -81,8 +100,8 @@ function runDailyCheck() {
       }
     }
 
-    const diffTime = paymentDate.getTime() - today.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const diffDays = daysBetween(today, paymentDate);
+    const isPending = !!pending[task.pageId];
 
     if (diffDays === NOTIFY_DAYS_BEFORE) {
       const title = `💸【請求予告】${task.name} (${task.price})`;
@@ -91,16 +110,38 @@ function runDailyCheck() {
       });
       console.log(`🔔 通知作成: ${task.name}`);
 
-      sendLineMessage(`💸 請求予告\n${task.name}\n金額: ${task.price}\n支払日: ${formatDate(paymentDate)}（${NOTIFY_DAYS_BEFORE}日前）`);
+      let text = `💸 請求予告\n${task.name}\n金額: ${task.price}\n支払日: ${formatDate(paymentDate)}（${NOTIFY_DAYS_BEFORE}日前）`;
+      if (isPending) text += '\n⏳ 解約手続き待ちです。済んだら「解約済み」と返信してください。';
+      sendLineMessage(text, withButtons ? [
+        quickReplyItem('🛑 解約したい', `${task.name} 解約したい`),
+        quickReplyItem('📅 支払い予定', '支払い予定')
+      ] : null);
+      notifiedIds.push(task.pageId);
+    } else if (isPending && CANCEL_REMINDER_DAYS.indexOf(diffDays) !== -1) {
+      // 「解約したい」と言ったまま完了の連絡がない → 請求日の前に念押しする
+      sendLineMessage(buildCancelReminderMessage(task, paymentDate, diffDays), [
+        quickReplyItem('✅ 解約済み', `${task.name} 解約済み`),
+        quickReplyItem('📝 解約方法', `${task.name} 解約したい`),
+        quickReplyItem('👌 続ける', `${task.name} 続ける`)
+      ]);
+      console.log(`⏰ 解約リマインド送信: ${task.name}`);
+      remindedIds.push(task.pageId);
     }
   });
+
+  // 通知への返信（「これ解約したい」など）が、今日通知したサービスを指せるように覚えておく
+  rememberNotifiedServices(notifiedIds, remindedIds);
+
+  // 解約済み・削除済みになったサービスを解約待ちから外す（Notionの取得に失敗した日は消さない）
+  if (fetched) cleanUpPendingCancels(pending, tasks);
 
   // 値上げ検知: 価格監視ONのサービスを月1ペースでチェックする。
   checkPricesForAll(tasks, today);
 
   // 毎月末日に、サブスク見直しを促すリマインド（未使用候補つき）をLINEへ送る
   if (isLastDayOfMonth(today)) {
-    sendLineMessage(buildMonthlyReminderMessage(tasks, today));
+    sendLineMessage(buildMonthlyReminderMessage(tasks, today),
+      withButtons ? buildMonthlyReminderQuickReplies(tasks, today) : null);
     console.log('🔔 月末リマインド送信');
   }
 }
@@ -126,9 +167,39 @@ function fetchNotionData() {
     const data = JSON.parse(response.getContentText());
     return data.results.map(parseNotionPage);
   } catch (e) {
+    // 取得失敗は null（「契約0件」と区別するため。呼び出し側は `|| []` で扱う）
     console.log("データ取得エラー: " + e);
-    return [];
+    return null;
   }
+}
+
+// ステータスを問わず全ページを取得する（LINEでの問い合わせ・解約済みの再契約に使う）。失敗時は null。
+function fetchAllNotionPages() {
+  const url = `https://api.notion.com/v1/databases/${DATABASE_ID}/query`;
+  const pages = [];
+  let cursor = null;
+  for (let i = 0; i < 20; i++) { // 1回100件 × 最大20回
+    const body = { page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      headers: notionHeaders(),
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) {
+      console.log(`❌ Notion取得エラー: ${res.getResponseCode()} ${res.getContentText()}`);
+      return null;
+    }
+    const data = JSON.parse(res.getContentText());
+    (data.results || []).forEach(page => {
+      const title = page.properties && page.properties[PROP_NAME] && page.properties[PROP_NAME].title;
+      if (title && title.some(t => (t.plain_text || '').trim())) pages.push(parseNotionPage(page)); // 名前が空の行は無視
+    });
+    if (!data.has_more || !data.next_cursor) break;
+    cursor = data.next_cursor;
+  }
+  return pages;
 }
 
 // Notionのページ1件を、このツールで扱う形のオブジェクトに変換する。
@@ -198,33 +269,102 @@ function parseNotionPage(page) {
     lastUsed = props[PROP_LAST_USED].date.start;
   }
 
+  // 解約・再契約の案内用（任意の列）
+  const cancelUrl = propText(props[PROP_CANCEL_URL]);
+  const restartUrl = propText(props[PROP_RESTART_URL]);
+  const cancelHowto = propText(props[PROP_CANCEL_HOWTO]);
+  const paymentMethod = propText(props[PROP_PAYMENT_METHOD]);
+  const aliasText = propText(props[PROP_ALIASES]);
+  const aliases = aliasText ? aliasText.split(/[,、，\/／|｜\n]+/).map(s => s.trim()).filter(Boolean) : [];
+
+  // Status列が「ステータス型」なら書き込みも同じ型で行う（既定はセレクト型）
+  const statusType = props[PROP_STATUS] && props[PROP_STATUS].type === 'status' ? 'status' : 'select';
+
   return {
     pageId: page.id, name, date: dateStr, price, priceNumber, billing, status,
-    url, priceWatch, priceCheckedDate, lastUsed
+    url, priceWatch, priceCheckedDate, lastUsed,
+    cancelUrl, restartUrl, cancelHowto, paymentMethod, aliases, statusType
   };
 }
 
-function calculateNextPaymentDate(currentDate, billingType) {
-  const newDate = new Date(currentDate);
-  if (!billingType) return null;
+// テキスト系の列（テキスト/URL/セレクト/マルチセレクト）を文字列で読む。無ければ null。
+function propText(prop) {
+  if (!prop) return null;
+  if (typeof prop.url === 'string' && prop.url) return prop.url;
+  if (prop.select) return prop.select.name;
+  if (prop.multi_select && prop.multi_select.length > 0) return prop.multi_select.map(o => o.name).join(',');
+  const rich = prop.rich_text || prop.title;
+  if (rich && rich.length > 0) return rich.map(r => r.plain_text).join('').trim() || null;
+  return null;
+}
 
+function calculateNextPaymentDate(currentDate, billingType) {
+  const months = billingMonths(billingType);
+  return months ? addMonthsClamped(currentDate, months) : null;
+}
+
+// 課金サイクルの月数。未知/未設定は null。
+function billingMonths(billingType) {
   switch (billingType) {
-    case 'Monthly':
-      newDate.setMonth(newDate.getMonth() + 1);
-      break;
-    case 'Quarterly': // 四半期（3ヶ月ごと）
-      newDate.setMonth(newDate.getMonth() + 3);
-      break;
-    case 'Yearly':
-      newDate.setFullYear(newDate.getFullYear() + 1);
-      break;
-    case '2 years':
-      newDate.setFullYear(newDate.getFullYear() + 2);
-      break;
-    default:
-      return null;
+    case 'Monthly': return 1;
+    case 'Quarterly':      // 四半期（3ヶ月ごと）。Notionの選択肢名の揺れも同じ扱いにする
+    case 'Every 3 months':
+    case '3 months': return 3;
+    case 'Yearly': return 12;
+    case '2 years': return 24;
+    default: return null;
   }
-  return newDate;
+}
+
+// months ヶ月後の同じ日。その月に同じ日が無ければ月末にそろえる（1/31 → 2/28）。
+// setMonth だけだと 1/31 → 3/3 のように月があふれ、2月分の支払日を飛ばしてしまうため。
+function addMonthsClamped(date, months) {
+  const d = new Date(date);
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + months);
+  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(day, lastDay));
+  return d;
+}
+
+// 支払日が今日より前なら、今日以降になるまで課金サイクル分進めた日付を返す。
+// 元の日付を基準に n サイクル後を計算するので、1/31 から数ヶ月分進めても「31日」がずれない。
+// Billing不明などで進められない場合は、元の日付をそのまま返す。
+function rollForwardPaymentDate(date, billing, today) {
+  const start = startOfDay(date);
+  if (start >= today) return start;
+  const months = billingMonths(billing);
+  if (!months) return start;
+  for (let n = 1; n <= 1200; n++) {
+    const d = addMonthsClamped(start, months * n);
+    if (d >= today) return d;
+  }
+  return start;
+}
+
+// Notionの「更新日」から、今日以降の次回支払日を求める（Notionは書き換えない）。
+// 戻り値: { date, stale }。stale=true は「過去日のまま進められない（Billing未設定）」。日付未登録なら null。
+function nextPaymentDate(task, today) {
+  const stored = parseYmd(task.date);
+  if (!stored) return null;
+  const date = rollForwardPaymentDate(stored, task.billing, today);
+  return { date: date, stale: date < today };
+}
+
+// from〜to（両端を含む）に来る支払日をすべて返す（期間内に2回来る場合も含む）。
+function paymentDatesBetween(task, from, to) {
+  const next = nextPaymentDate(task, from);
+  if (!next || next.stale || next.date > to) return [];
+  const months = billingMonths(task.billing);
+  if (!months) return [next.date];
+  const dates = [];
+  for (let n = 0; n < 100; n++) {
+    const d = addMonthsClamped(next.date, months * n);
+    if (d > to) break;
+    dates.push(d);
+  }
+  return dates;
 }
 
 // Notionページのプロパティをまとめて更新する汎用関数。
@@ -268,6 +408,58 @@ function formatIso(date) {
   return Utilities.formatDate(date, "JST", "yyyy-MM-dd");
 }
 
+const WEEKDAYS_JA = ['日', '月', '火', '水', '木', '金', '土'];
+
+// LINE表示用の日付。今年なら「10/15（木）」、別の年なら「2027/3/1（月）」。
+function formatDateJa(date, today) {
+  const base = today || startOfToday();
+  const pattern = date.getFullYear() === base.getFullYear() ? 'M/d' : 'yyyy/M/d';
+  return `${Utilities.formatDate(date, "JST", pattern)}（${WEEKDAYS_JA[date.getDay()]}）`;
+}
+
+// 「今日」「明日」「あと13日」「3日前」
+function describeDaysUntil(days) {
+  if (days === 0) return '今日';
+  if (days === 1) return '明日';
+  if (days > 1) return `あと${days}日`;
+  return `${-days}日前`;
+}
+
+// 課金サイクル（月数）の表示名
+const BILLING_LABELS = { 1: '毎月', 3: '3ヶ月ごと', 12: '毎年', 24: '2年ごと' };
+const BILLING_SHORT_LABELS = { 1: '月', 3: '3ヶ月', 12: '年', 24: '2年' };
+
+function billingLabel(billing) {
+  return BILLING_LABELS[billingMonths(billing)] || 'サイクル未設定';
+}
+
+function priceText(task) {
+  return task.priceNumber === null || task.priceNumber === undefined ? '金額未登録' : task.price;
+}
+
+// 「¥1,490（毎月）」
+function priceWithCycle(task) {
+  return `${priceText(task)}（${billingLabel(task.billing)}）`;
+}
+
+// 「¥1,490/月」
+function priceShort(task) {
+  const cycle = BILLING_SHORT_LABELS[billingMonths(task.billing)];
+  return cycle ? `${priceText(task)}/${cycle}` : priceText(task);
+}
+
+// Notionの日付文字列（yyyy-MM-dd、または日時）を、その日の0時（スクリプトのタイムゾーン）として読む。
+function parseYmd(str) {
+  const m = String(str || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+
+function addDays(date, days) {
+  const d = startOfDay(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
 // 時刻を切り捨てた「今日」
 function startOfToday() {
   const d = new Date();
@@ -282,15 +474,17 @@ function startOfDay(date) {
 }
 
 // from から to までの日数差（時刻は無視）。to のほうが新しければ正の値。
+// 夏時間のあるタイムゾーンでも1日=23/25時間の日がずれないよう四捨五入する。
 function daysBetween(from, to) {
   const ms = startOfDay(to).getTime() - startOfDay(from).getTime();
-  return Math.floor(ms / (1000 * 60 * 60 * 24));
+  return Math.round(ms / (1000 * 60 * 60 * 24));
 }
 
 // LINE Messaging API（broadcast）で友だち全員にテキストを配信する。
 // LINE Notify は 2025-03-31 に終了したため Messaging API を使用する。
 // トークン未設定なら何もしない（既存のカレンダー機能を壊さないため）。
-function sendLineMessage(text) {
+// quickReplyItems を渡すと、タップで返信できるボタン（クイックリプライ）を付ける。
+function sendLineMessage(text, quickReplyItems) {
   if (!LINE_CHANNEL_ACCESS_TOKEN) {
     console.log("ℹ️ LINE_CHANNEL_ACCESS_TOKEN 未設定のため、LINE送信をスキップしました。");
     return;
@@ -303,7 +497,7 @@ function sendLineMessage(text) {
       'Content-Type': 'application/json'
     },
     payload: JSON.stringify({
-      messages: [{ type: 'text', text: text }]
+      messages: [buildTextMessage(text, quickReplyItems)]
     }),
     muteHttpExceptions: true
   };
@@ -317,14 +511,155 @@ function sendLineMessage(text) {
   }
 }
 
+// LINEのテキストメッセージを組み立てる（quickReplyItems があればボタンを付ける）。
+function buildTextMessage(text, quickReplyItems) {
+  const message = { type: 'text', text: truncateChars(text, LINE_TEXT_MAX) };
+  if (quickReplyItems && quickReplyItems.length > 0) {
+    message.quickReply = { items: quickReplyItems.slice(0, QUICK_REPLY_MAX) };
+  }
+  return message;
+}
+
+// タップすると text をそのまま送信するボタン。label は最大20文字（LINEの仕様）。
+function quickReplyItem(label, text) {
+  return {
+    type: 'action',
+    action: { type: 'message', label: truncateChars(label, 20), text: truncateChars(text, 300) }
+  };
+}
+
+// LINEの文字数上限に収まるよう切り詰める。LINEはUTF-16単位で数える（絵文字は2文字）ため
+// String.length で測り、絵文字の途中では切らない。
+function truncateChars(text, max) {
+  const s = String(text);
+  if (s.length <= max) return s;
+  let out = '';
+  for (const ch of Array.from(s)) {
+    if (out.length + ch.length > max - 1) break;
+    out += ch;
+  }
+  return out + '…';
+}
+
+// LINEで操作（Webhook）を使っているか。通知にボタンを付けるかどうかの判定に使う。
+// （Webhook未設定だとボタンを押しても何も起きないため。ALLOWED_LINE_USER_IDS はWebhook利用時に設定するもの）
+function isLineTwoWayEnabled() {
+  return !!PropertiesService.getScriptProperties().getProperty('ALLOWED_LINE_USER_IDS');
+}
+
+// =====================================================================
+// 解約手続き待ち
+//  - LINEで「解約したい」と言ったサービスを覚えておき、「解約済み」「続ける」の連絡が
+//    来るまで、支払日の CANCEL_REMINDER_DAYS 日前にLINEで念押しする。
+//  - 実際の解約はサービス側でしかできないため、「手続きし忘れたまま請求日を迎える」のを防ぐ仕組み。
+//  - スクリプトプロパティ PENDING_CANCELS に {pageId: {name, since}} で保存する。
+// =====================================================================
+function loadPendingCancels() {
+  try {
+    return JSON.parse(PropertiesService.getScriptProperties().getProperty(PENDING_CANCELS_KEY) || '{}') || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function savePendingCancels(map) {
+  const props = PropertiesService.getScriptProperties();
+  if (Object.keys(map).length === 0) props.deleteProperty(PENDING_CANCELS_KEY);
+  else props.setProperty(PENDING_CANCELS_KEY, JSON.stringify(map));
+}
+
+function setPendingCancel(task, today) {
+  const map = loadPendingCancels();
+  if (!map[task.pageId]) {
+    map[task.pageId] = { name: task.name, since: formatIso(today || startOfToday()) };
+    savePendingCancels(map);
+  }
+}
+
+// 解約待ちを外す。外したら true。
+function clearPendingCancel(pageId) {
+  const map = loadPendingCancels();
+  if (!map[pageId]) return false;
+  delete map[pageId];
+  savePendingCancels(map);
+  return true;
+}
+
+// Active一覧に無くなった（解約済み・削除済み）サービスを解約待ちから外す
+function cleanUpPendingCancels(pending, activeTasks) {
+  const activeIds = {};
+  activeTasks.forEach(t => { activeIds[t.pageId] = true; });
+  const stale = Object.keys(pending).filter(id => !activeIds[id]);
+  if (stale.length === 0) return;
+  const map = loadPendingCancels();
+  stale.forEach(id => delete map[id]);
+  savePendingCancels(map);
+}
+
+function buildCancelReminderMessage(task, paymentDate, diffDays) {
+  return [
+    '⏰ 解約手続きはお済みですか？',
+    `${task.name}（${task.price}）`,
+    `次回支払日: ${formatDateJa(paymentDate)} ${describeDaysUntil(diffDays)}`,
+    '',
+    '済んでいたら「解約済み」、やめずに続けるなら「続ける」を押してください。'
+  ].join('\n');
+}
+
+// =====================================================================
+// 会話の文脈（直前に話題にしたサービス）
+//  - 「これっていつ支払い？」「じゃあ解約したい」のように名前を省いた発言を、
+//    直前のやり取り（または今日の通知）のサービスとして扱うために使う。
+//  - スクリプトプロパティ LINE_CONTEXT_<ユーザーID> / LINE_CONTEXT_broadcast に保存する。
+// =====================================================================
+function saveConversationContext(key, pageIds, intent) {
+  if (!key || !pageIds || pageIds.length === 0) return;
+  try {
+    PropertiesService.getScriptProperties().setProperty(CONTEXT_KEY_PREFIX + key,
+      JSON.stringify({ ids: pageIds.slice(0, QUICK_REPLY_MAX), intent: intent, at: Date.now() }));
+  } catch (e) {
+    console.log('⚠️ 会話の文脈を保存できませんでした: ' + e);
+  }
+}
+
+function readConversationContext(key) {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(CONTEXT_KEY_PREFIX + key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ユーザーとの直前のやり取りと、今日の通知のうち、期限内で新しいほうの文脈を返す
+function loadConversationContext(userId) {
+  return pickConversationContext(
+    userId ? readConversationContext(userId) : null,
+    readConversationContext('broadcast'),
+    Date.now());
+}
+
+function pickConversationContext(userContext, broadcastContext, nowMs) {
+  const valid = [];
+  if (userContext && nowMs - userContext.at <= CONTEXT_TTL_MINUTES * 60 * 1000) valid.push(userContext);
+  if (broadcastContext && nowMs - broadcastContext.at <= BROADCAST_CONTEXT_TTL_HOURS * 60 * 60 * 1000) valid.push(broadcastContext);
+  valid.sort((a, b) => b.at - a.at);
+  return valid[0] || null;
+}
+
+// 今日通知したサービスを文脈として覚えておく。解約リマインドだけなら「解約済み」の返信にも使える。
+function rememberNotifiedServices(notifiedIds, remindedIds) {
+  const ids = remindedIds.concat(notifiedIds.filter(id => remindedIds.indexOf(id) === -1));
+  if (ids.length === 0) return;
+  const intent = notifiedIds.length === 0 ? 'cancelWant' : 'info';
+  saveConversationContext('broadcast', ids, intent);
+}
+
 // 課金サイクルを月額換算する。未知/未設定の billing は 0 を返す。
 function monthlyEquivalent(priceNumber, billing) {
   if (priceNumber === null || priceNumber === undefined) return 0;
-  if (billing === 'Monthly') return priceNumber;
-  if (billing === 'Quarterly') return priceNumber / 3;
-  if (billing === 'Yearly') return priceNumber / 12;
-  if (billing === '2 years') return priceNumber / 24;
-  return 0;
+  const months = billingMonths(billing);
+  return months ? priceNumber / months : 0;
 }
 
 // 月末日かどうか（翌日が1日なら末日）。月の長さ（28/29/30/31）を問わず正しく判定する。
@@ -454,13 +789,23 @@ function buildMonthlyReminderMessage(tasks, today) {
   if (unused.length > 0) {
     lines.push('', `💤 ${UNUSED_DAYS}日以上使っていない可能性:`);
     unused.forEach(t => lines.push(`・${t.name}（最終利用 ${formatDate(new Date(t.lastUsed))}）`));
-    lines.push('解約する場合は「解約 サービス名」とこのトークに送ってください。');
+    lines.push('解約するなら「サービス名 解約したい」と送ってください（解約方法と期限を返します）。');
   }
 
   const noRecord = list.filter(t => !t.lastUsed).length;
   if (noRecord > 0) {
-    lines.push('', `ℹ️ 利用日が未記録: ${noRecord}件（使ったら「使った サービス名」と送ると記録できます）`);
+    lines.push('', `ℹ️ 利用日が未記録: ${noRecord}件（使ったら「サービス名 使った」と送ると記録できます）`);
   }
 
   return lines.join('\n');
+}
+
+// 月末リマインドのボタン: 未使用候補の「解約したい」＋来月の支払い・一覧
+function buildMonthlyReminderQuickReplies(tasks, today) {
+  const items = detectUnusedTasks(tasks || [], today || startOfToday())
+    .slice(0, QUICK_REPLY_MAX - 2)
+    .map(t => quickReplyItem(`🛑 ${t.name}`, `${t.name} 解約したい`));
+  items.push(quickReplyItem('📅 来月の支払い', '来月の支払い'));
+  items.push(quickReplyItem('📋 一覧', '一覧'));
+  return items;
 }
