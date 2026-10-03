@@ -222,6 +222,10 @@ function testLogic() {
   check('組み込みの解約ページは名前がサービス名で始まるときだけ（バンドル契約を取り違えない）',
     [!!findServicePreset('Netflix'), !!findServicePreset('LYP Premium with Netflix'), !!findServicePreset('Disneyplus (JP)')],
     [true, false, true]);
+  check('解約の期限: 2日前を目安に案内する',
+    cancelDeadlineHint(new Date(2026, 9, 15), 13, oct2).indexOf('2日前の 10/13（火） まで') !== -1, true);
+  check('解約の期限: 明後日・明日なら今日中／今すぐ',
+    [2, 1].map(d => /今日中|今すぐ/.test(cancelDeadlineHint(addDays(oct2, d), d, oct2))), [true, true]);
 
   // --- LINEのボタン・リマインド文 ---
   // LINEは絵文字を2文字と数える（UTF-16）ので String.length で20以内

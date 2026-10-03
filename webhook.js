@@ -490,10 +490,13 @@ function cancelGuideReply(page, today) {
   };
 }
 
+// 締切が「更新の24〜48時間前」のサービス（App Store・Google Play・Uber One など）もあるので、2日前を目安に案内する
 function cancelDeadlineHint(date, days, today) {
   if (days <= 0) return '⚠️ 今日が支払日です。今回分は請求済みかもしれません。次回分を止めるなら早めに手続きを。';
-  if (days === 1) return '⚠️ 明日が支払日です。今日中の手続きがおすすめです。';
-  return `→ 前日の ${formatDateJa(addDays(date, -1), today)} までに手続きすれば、次回の請求を止められることが多いです。`;
+  const note = '（「更新の24〜48時間前まで」が締切のサービスもあります）';
+  if (days === 1) return `⚠️ 明日が支払日です。今すぐの手続きがおすすめです${note}。`;
+  if (days === 2) return `⚠️ 支払日は明後日です。今日中の手続きがおすすめです${note}。`;
+  return `→ 2日前の ${formatDateJa(addDays(date, -2), today)} までに手続きすると安心です${note}。`;
 }
 
 function reminderDaysText() {

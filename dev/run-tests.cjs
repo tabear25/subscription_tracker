@@ -168,7 +168,7 @@ test('会話: 解約したい → 案内（Notionは変えない）→ 解約し
   const env = chat();
   const guide = env.say('Netflix解約したい');
   assert.match(guide.text, /https:\/\/www\.netflix\.com\/cancelplan/);
-  assert.match(guide.text, /前日の 10\/14（水） までに/);
+  assert.match(guide.text, /2日前の 10\/13（火） までに/);
   assert.deepStrictEqual(guide.buttons, ['Netflix 解約済み', 'Netflix 続ける']);
   assert.strictEqual(env.patches.length, 0);
   assert.ok(env.pending().netflix);
