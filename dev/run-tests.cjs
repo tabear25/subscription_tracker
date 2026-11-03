@@ -14,7 +14,7 @@ const vm = require('vm');
 const assert = require('assert');
 
 const ROOT = path.join(__dirname, '..');
-const SOURCE = ['main.js', 'webhook.js', 'test.js'].map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n;\n');
+const SOURCE = ['main.js', 'webhook.js', 'widget.js', 'test.js'].map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n;\n');
 
 // ---------- GAS / Notion / LINE の偽物 ----------
 const lineViolations = []; // LINEの仕様違反（本物なら 400 で送信失敗するもの）
@@ -93,7 +93,10 @@ function createEnv({ now, pages = [], props = {}, notionDown = false }) {
       .replace('yyyy', d.getFullYear()).replace('MM', pad(d.getMonth() + 1)).replace('dd', pad(d.getDate()))
       .replace(/\bM\b/, d.getMonth() + 1).replace(/\bd\b/, d.getDate()) },
     CalendarApp: { getDefaultCalendar: () => ({ createAllDayEvent: () => {} }) },
-    ContentService: { MimeType: { JSON: 'json' }, createTextOutput: () => ({ setMimeType: () => ({}) }) }
+    ContentService: { MimeType: { JSON: 'json' }, createTextOutput: text => {
+      const output = { getContent: () => text, setMimeType: () => output };
+      return output;
+    } }
   });
   vm.runInContext(SOURCE, ctx, { filename: 'gas-bundle.js' });
 
@@ -286,6 +289,46 @@ test('長いサービス名でもLINEの文字数制限内に収まる（月末�
   env.say('解約したい');
   env.say('adobe いつ？');
   env.say(`${longName}と${longName} 2 いつ？`);
+});
+
+// ウィジェット用の doGet を呼んで、返ってきた JSON を読む
+const widgetGet = (env, token) => JSON.parse(env.ctx.doGet({ parameter: token === undefined ? {} : { token } }).getContent());
+
+test('ウィジェット: 合言葉が未設定・不一致なら拒否し、Notion障害時はエラーを返す', () => {
+  const unset = createEnv({ now: '2026-10-02T10:00:00+09:00', pages: PAGES });
+  assert.deepStrictEqual(widgetGet(unset, 'anything'), { ok: false, error: 'not_configured' });
+
+  const env = createEnv({ now: '2026-10-02T10:00:00+09:00', pages: PAGES, props: { WIDGET_TOKEN: 'secret' } });
+  assert.deepStrictEqual(widgetGet(env, 'wrong'), { ok: false, error: 'unauthorized' });
+  assert.deepStrictEqual(widgetGet(env), { ok: false, error: 'unauthorized' });
+  assert.strictEqual(env.patches.length, 0);
+
+  const down = createEnv({ now: '2026-10-02T10:00:00+09:00', pages: PAGES, props: { WIDGET_TOKEN: 'secret' }, notionDown: true });
+  assert.deepStrictEqual(widgetGet(down, 'secret'), { ok: false, error: 'notion_error' });
+});
+
+test('ウィジェット: 契約中の支払い予定と月額換算を返し、LINEの「今月の支払い」と合計が一致する', () => {
+  const env = createEnv({ now: '2026-10-02T10:00:00+09:00', pages: PAGES, props: { WIDGET_TOKEN: 'secret', ALLOWED_LINE_USER_IDS: 'U1' } });
+  const data = widgetGet(env, 'secret');
+  assert.strictEqual(data.ok, true);
+  assert.strictEqual(data.today, '2026-10-02');
+  assert.strictEqual(data.activeCount, 4); // 解約済みの Disney Plus は含めない
+  assert.strictEqual(data.monthlyTotal, 1490 + 980 + 86880 / 12 + 8000);
+  assert.strictEqual(data.notionUrl, 'https://www.notion.so/db');
+  assert.deepStrictEqual(data.payments.map(p => `${p.date} ${p.name} ${p.price}`), [
+    '2026-10-05 Spotify 980',
+    '2026-10-15 Netflix 1490',
+    '2026-10-31 ジム 8000',
+    '2026-11-05 Spotify 980',
+    '2026-11-15 Netflix 1490',
+    '2026-11-30 ジム 8000', // 31日払いは短い月の月末にそろえる
+    '2027-03-01 Adobe Creative Cloud 86880' // 期間外でも次回支払日は1件返す
+  ]);
+  assert.strictEqual(env.patches.length, 0); // 読み取り専用
+
+  const restOfMonth = data.payments.filter(p => p.date <= '2026-10-31').reduce((sum, p) => sum + p.price, 0);
+  const lineTotal = env.say('今月の支払い').text.match(/合計 ¥([\d,]+)/)[1];
+  assert.strictEqual(restOfMonth.toLocaleString(), lineTotal);
 });
 
 test('LINEに送ったメッセージがすべて仕様の上限内', () => {
