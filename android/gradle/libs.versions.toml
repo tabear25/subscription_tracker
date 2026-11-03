@@ -1,0 +1,24 @@
+[versions]
+agp = "8.13.0"
+kotlin = "2.2.21"
+glance = "1.2.0"
+work = "2.12.0"
+activityCompose = "1.13.0"
+# compileSdk 36 でビルドできる（AAR の minCompileSdk=35 を確認済み）版を使う
+composeBom = "2026.05.00"
+junit = "4.13.2"
+orgJson = "20260814"
+
+[libraries]
+glance-appwidget = { group = "androidx.glance", name = "glance-appwidget", version.ref = "glance" }
+work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
+activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

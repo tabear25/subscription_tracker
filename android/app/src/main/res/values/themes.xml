@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 画面の中身は Compose（Material 3）で描く。ここは起動直後の背景色のためだけの設定 -->
+    <style name="Theme.SubscriptionWidget" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

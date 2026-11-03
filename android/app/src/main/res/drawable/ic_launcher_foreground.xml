@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- アプリアイコン（カレンダーに円記号）。テーマアイコン（単色）にもこのまま使う -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M43,38L65,38A7,7 0,0 1,72 45L72,67A7,7 0,0 1,65 74L43,74A7,7 0,0 1,36 67L36,45A7,7 0,0 1,43 38Z"
+        android:strokeWidth="3.5"
+        android:strokeColor="#FF284777"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M36,47L72,47M45,33L45,41M63,33L63,41"
+        android:strokeWidth="3.5"
+        android:strokeColor="#FF284777"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M48.5,53L54,60.5L59.5,53M54,60.5L54,69.5M49.5,61.5L58.5,61.5M49.5,65.5L58.5,65.5"
+        android:strokeWidth="3"
+        android:strokeColor="#FF284777"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

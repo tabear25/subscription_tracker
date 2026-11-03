@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  置いたときの既定は 4×2。2×1 から 4×3 程度まで大きさを変えられる。
+  maxResizeWidth は横向き（1列が広い）でも4列分が収まる幅にする。小さいとランチャーが
+  targetCellWidth="4" を無視し、minWidth から計算した3列で置いてしまう（エミュレーターで確認）。
+  更新は WorkManager で行うので updatePeriodMillis は 0（使わない）。
+  configuration_optional: 置いたときに設定画面を出さない（未設定ならウィジェットに案内を出す）。
+  reconfigurable: 長押しの「ウィジェットを設定」から設定画面を開ける。
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:configure="io.github.tabear25.subscriptionwidget.settings.SettingsActivity"
+    android:description="@string/widget_description"
+    android:initialLayout="@layout/glance_default_loading_layout"
+    android:maxResizeHeight="440dp"
+    android:maxResizeWidth="1200dp"
+    android:minHeight="110dp"
+    android:minResizeHeight="50dp"
+    android:minResizeWidth="100dp"
+    android:minWidth="250dp"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="2"
+    android:targetCellWidth="4"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen"
+    android:widgetFeatures="reconfigurable|configuration_optional" />
