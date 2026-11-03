@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">サブスク</string>
+    <string name="widget_name">次の支払い</string>
+    <string name="widget_description">次の支払い日と金額、月額換算の合計、今月の残りを表示します。</string>
+    <string name="refresh">最新の情報に更新</string>
+</resources>
